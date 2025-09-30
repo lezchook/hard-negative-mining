@@ -31,7 +31,7 @@ def last_token_pool(last_hidden_states: Tensor, attention_mask: Tensor) -> Tenso
 def get_detailed_instruct(task_description: str, query: str) -> str:
     return f'Instruct: {task_description}\nQuery: {query}'
 
-def encode_texts(model: AutoModel, tokenizer: AutoTokenizer, input_text: str, device: str = "cuda") -> Tensor:
+def encode_texts(model: AutoModel, tokenizer: AutoTokenizer, input_text: list[str], device: str = "cuda") -> Tensor:
     texts_dict = tokenizer(input_text, max_length=4096, padding=True, truncation=True, return_tensors='pt').to(device)
     with torch.no_grad():
         outputs = model(**texts_dict)
@@ -45,7 +45,7 @@ def start_inference(data_path, output_file):
     
     data = load_dataset(data_path)
     tokenizer = AutoTokenizer.from_pretrained("intfloat/e5-mistral-7b-instruct")
-    model = AutoModel.from_pretrained("intfloat/e5-mistral-7b-instruct", device_map="auto") # .to(device)
+    model = AutoModel.from_pretrained("intfloat/e5-mistral-7b-instruct").to(device)
     model.eval()
     
     with open(output_file, "a", encoding="utf-8") as f:
@@ -55,8 +55,9 @@ def start_inference(data_path, output_file):
             query = sample["question"]
             query_text = get_detailed_instruct(task, query)
             context = sample["context"]
-            query_emb = encode_texts(model, tokenizer, query_text, device)
-            context_emb = encode_texts(model, tokenizer, context, device)
+            embedding = encode_texts(model, tokenizer, [query_text, context], device)
+            query_emb = embedding[0:1]
+            context_emb = embedding[1:2]
 
             result = {
                 "index": idx,
