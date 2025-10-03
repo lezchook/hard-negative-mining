@@ -6,7 +6,7 @@ from tqdm.auto import tqdm
 
 def hard_negative_mining(index: int,  query: str, positive_doc: str, candidate_docs: list[str], 
                             q_emb: Tensor, pos_emb: Tensor, cand_embs: Tensor, margin: float = 0.95, top_k: int = 5, device="cuda") -> dict:
-    pos_score = (q_emb @ pos_emb.T).item()
+    pos_score = (q_emb @ pos_emb).item()
     scores = (q_emb @ cand_embs.T).squeeze(0)
 
     threshold = pos_score * margin
@@ -18,7 +18,7 @@ def hard_negative_mining(index: int,  query: str, positive_doc: str, candidate_d
     hard_negatives = []
     if len(filtered_scores) > 0:
         sorted_scores, sorted_idx = torch.sort(filtered_scores, descending=True)
-        for idx in sorted_idx.tolist():
+        for idx in sorted_idx:
             doc = candidate_docs[filtered_indices[idx]]
             if doc not in hard_negatives:
                 hard_negatives.append(doc)
@@ -59,11 +59,11 @@ def start_mining(data_path, output_file):
         for idx in range(length):
             query = queries[idx]
             positive_doc = contexts[idx]
-            query_emb = queries_emb[idx]
-            positive_doc_emb = contexts_emb[idx]
+            query_emb = queries_emb[idx].to(device)
+            positive_doc_emb = contexts_emb[idx].to(device)
 
             candidate_docs = contexts[0:idx] + contexts[idx + 1:length]
-            candidate_docs_emb = torch.cat((contexts_emb[0:idx], contexts_emb[idx + 1:length]), dim=0)
+            candidate_docs_emb = torch.cat((contexts_emb[0:idx], contexts_emb[idx + 1:length]), dim=0).to(device)
 
             result = hard_negative_mining(idx, query, positive_doc, candidate_docs, query_emb, positive_doc_emb, candidate_docs_emb, margin=0.95, top_k=5, device=device)
             
