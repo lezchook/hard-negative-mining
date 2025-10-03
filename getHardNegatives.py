@@ -5,14 +5,14 @@ import argparse
 from tqdm.auto import tqdm
 
 def hard_negative_mining(index: int,  query: str, positive_doc: str, candidate_docs: list[str], 
-                            q_emb: Tensor, pos_emb: Tensor, cand_embs: Tensor, margin: float = 0.95, top_k: int = 5, device="cuda") -> dict:
+                            q_emb: Tensor, pos_emb: Tensor, cand_embs: Tensor, margin: float = 0.95, top_k: int = 5) -> dict:
     pos_score = (q_emb @ pos_emb).item()
     scores = (q_emb @ cand_embs.T).squeeze(0)
 
     threshold = pos_score * margin
     mask = scores < threshold
     filtered_scores = scores[mask]
-    filtered_indices = torch.arange(len(candidate_docs), device=device)[mask]
+    filtered_indices = torch.arange(len(candidate_docs))[mask]
 
     # top-k самых трудных
     hard_negatives = []
@@ -51,7 +51,6 @@ def get_data_from_json(data_path: str) -> list:
     return queries, contexts, queries_emb, contexts_emb, length
 
 def start_mining(data_path, output_file):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     queries, contexts, queries_emb, contexts_emb, length = get_data_from_json(data_path)   
 
     with open(output_file, "a", encoding="utf-8") as f:
@@ -59,13 +58,13 @@ def start_mining(data_path, output_file):
         for idx in range(length):
             query = queries[idx]
             positive_doc = contexts[idx]
-            query_emb = queries_emb[idx].to(device)
-            positive_doc_emb = contexts_emb[idx].to(device)
+            query_emb = queries_emb[idx]
+            positive_doc_emb = contexts_emb[idx]
 
             candidate_docs = contexts[0:idx] + contexts[idx + 1:length]
-            candidate_docs_emb = torch.cat((contexts_emb[0:idx], contexts_emb[idx + 1:length]), dim=0).to(device)
+            candidate_docs_emb = torch.cat((contexts_emb[0:idx], contexts_emb[idx + 1:length]), dim=0)
 
-            result = hard_negative_mining(idx, query, positive_doc, candidate_docs, query_emb, positive_doc_emb, candidate_docs_emb, margin=0.95, top_k=5, device=device)
+            result = hard_negative_mining(idx, query, positive_doc, candidate_docs, query_emb, positive_doc_emb, candidate_docs_emb, margin=0.95, top_k=5)
             
             f.write(json.dumps(result, ensure_ascii=False) + "\n")
             f.flush()
