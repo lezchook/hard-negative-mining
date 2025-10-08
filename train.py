@@ -73,4 +73,4 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=str, required=True)
     args = parser.parse_args()
 
-    start(args.train_data_path, args.val_data_path, args.batch_size)
+    start(args.train_data_path, args.val_data_path, int(args.batch_size))
