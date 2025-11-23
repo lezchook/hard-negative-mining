@@ -15,50 +15,75 @@ def pool(hidden_state, mask, pooling_method="cls"):
         return hidden_state[:, 0]
 
 class HardNegativeInfoNCELoss(nn.Module):
-    def __init__(self, temperature=0.02, false_negative_margin=0.1):
+    def __init__(self, temperature: float = 0.02, false_negative_margin: float = 0.1, eps: float = 1e-8):
         super().__init__()
         self.temperature = temperature
         self.false_negative_margin = false_negative_margin
+        self.eps = eps
 
-    def forward(self, query, passage, negative_passages):
+    def forward(self, query: torch.Tensor, passage: torch.Tensor, negative_passages: torch.Tensor = None):
+        device = query.device
         batch_size = query.size(0)
 
-        s_positive = F.cosine_similarity(query, passage, dim=-1) # s(q_i, d+_i)
-        s_hard_neg = F.cosine_similarity(query.unsqueeze(1), negative_passages, dim=-1) # s(q_i, d-_i,k)
-        
-        s_in_batch_docs = torch.mm(query, passage.t()) / (query.norm(dim=1, keepdim=True) @ passage.norm(dim=1, keepdim=True).t() + 1e-8)
-        s_in_batch_queries = torch.mm(query, query.t()) / (query.norm(dim=1, keepdim=True) @ query.norm(dim=1, keepdim=True).t() + 1e-8)
-        
-        threshold = s_positive.unsqueeze(1) + self.false_negative_margin
+        q = F.normalize(query, dim=-1)
+        d_pos = F.normalize(passage, dim=-1)
 
-        mask_hard = (s_hard_neg <= threshold).float()
-        mask_docs = (s_in_batch_docs <= threshold).float()
-        mask_docs = mask_docs * (1 - torch.eye(batch_size, device=query.device))
-        
-        mask_queries = (s_in_batch_queries <= threshold).float()
-        mask_queries = mask_queries * (1 - torch.eye(batch_size, device=query.device))
+        if negative_passages is not None:
+            d_neg = F.normalize(negative_passages, dim=-1)
 
-        s_positive_scaled = s_positive / self.temperature
-        s_hard_neg_scaled = s_hard_neg / self.temperature
-        s_in_batch_docs_scaled = s_in_batch_docs / self.temperature
-        s_in_batch_queries_scaled = s_in_batch_queries / self.temperature
-        
-        
-        exp_positive = torch.exp(s_positive_scaled)
-        
-        exp_hard_neg = torch.exp(s_hard_neg_scaled) * mask_hard
-        sum_hard_neg = exp_hard_neg.sum(dim=1)
-        
-        exp_docs = torch.exp(s_in_batch_docs_scaled) * mask_docs
-        sum_docs = exp_docs.sum(dim=1)
-        
-        exp_queries = torch.exp(s_in_batch_queries_scaled) * mask_queries
-        sum_queries = exp_queries.sum(dim=1)
-        
-        Z = exp_positive + sum_hard_neg + sum_docs + sum_queries
-   
-        loss = -torch.log(exp_positive / (Z + 1e-8))
-        
+        s_pos = (q * d_pos).sum(dim=-1)
+
+        if negative_passages is not None:
+            s_hard = torch.einsum("bd,bkd->bk", q, d_neg)
+        else:
+            s_hard = None
+
+        s_q_q = q @ q.t()
+        s_q_d = q @ d_pos.t()
+        s_dpos_d = d_pos @ d_pos.t()
+
+        threshold = s_pos.unsqueeze(1) + self.false_negative_margin
+
+        if s_hard is not None:
+            mask_hard = (s_hard <= threshold).float()
+        else:
+            mask_hard = None
+
+
+        eye = torch.eye(batch_size, device=device)
+        mask_qd = (s_q_d <= threshold).float()
+        mask_qd = mask_qd * (1.0 - eye)
+
+        mask_qq = (s_q_q <= threshold).float()
+        mask_qq = mask_qq * (1.0 - eye)
+
+        s_pos_scaled = s_pos / self.temperature
+        if s_hard is not None:
+            s_hard_scaled = s_hard / self.temperature
+        s_q_q_scaled = s_q_q / self.temperature
+        s_q_d_scaled = s_q_d / self.temperature
+        s_dpos_d_scaled = s_dpos_d / self.temperature
+
+        exp_pos = torch.exp(s_pos_scaled)
+
+        if s_hard is not None:
+            exp_hard = torch.exp(s_hard_scaled) * mask_hard
+            sum_hard = exp_hard.sum(dim=1)
+        else:
+            sum_hard = torch.zeros_like(exp_pos)
+
+        exp_q_q = torch.exp(s_q_q_scaled) * mask_qq
+        sum_q_q = exp_q_q.sum(dim=1)
+
+        exp_d_d = torch.exp(s_dpos_d_scaled) * mask_qd
+        sum_d_d = exp_d_d.sum(dim=1)
+
+        exp_q_d = torch.exp(s_q_d_scaled) * mask_qd
+        sum_q_d = exp_q_d.sum(dim=1)
+
+        Z = exp_pos + sum_hard + sum_q_q + sum_d_d + sum_q_d
+
+        loss = -torch.log(exp_pos / (Z + self.eps))
         return loss.mean()
     
 class LitContrastiveModel(LightningModule):
