@@ -2,7 +2,7 @@ import json
 from utils import get_data, get_batches
 from torch.utils.data import DataLoader
 from datasets import load_dataset
-from model import HardNegativeInfoNCELoss, LitContrastiveModel
+from model import HardNegativeInfoNCELoss, LitContrastiveModel, ContrastiveLoss
 from lightning import Trainer
 from lightning import seed_everything
 import argparse
@@ -47,7 +47,7 @@ def start(train_data_path, val_data_path, batch_size):
     testloader = get_testloader(val_data_path, batch_size)
 
     model = LitContrastiveModel(
-        model_path="cointegrated/rubert-tiny2",
+        model_path="cointegrated/rubert-tiny",
         loss_fn=HardNegativeInfoNCELoss(),
         lr=9e-5,
         weight_decay=0.01,

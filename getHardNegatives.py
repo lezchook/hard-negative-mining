@@ -4,96 +4,120 @@ from torch import Tensor
 import argparse
 from tqdm.auto import tqdm
 
-def hard_negative_mining_batch(queries_emb: Tensor, contexts_emb: Tensor, margin: float = 0.95, top_k: int = 5) -> list[list[int]]:
+
+def hard_negative_mining_batch(queries_emb: Tensor, contexts_emb: Tensor, pos_idx: Tensor, margin: float = 0.95, top_k: int = 5) -> list[list[int]]:
     all_scores = queries_emb @ contexts_emb.T
-    
-    # Позитивные scores - диагональ матрицы
-    pos_scores = torch.diag(all_scores)
-    
-    # Threshold для каждого query
+
+    device = queries_emb.device
+    B = queries_emb.size(0)
+
+    row_idx = torch.arange(B, device=device)
+
+    pos_scores = all_scores[row_idx, pos_idx]
+
     thresholds = pos_scores * margin
-    
+
     mask = torch.ones_like(all_scores, dtype=torch.bool)
-    mask.fill_diagonal_(False)
-    
+    mask[row_idx, pos_idx] = False
+
     threshold_mask = all_scores < thresholds.unsqueeze(1)
     final_mask = mask & threshold_mask
-    
-    # Извлекаем top-k hard negatives для каждого query
-    hard_negatives_indices = []
-    for i in range(len(queries_emb)):
+
+    hard_negatives_indices: list[list[int]] = []
+
+    for i in range(B):
         valid_indices = torch.where(final_mask[i])[0]
-        
+
         if len(valid_indices) > 0:
             valid_scores = all_scores[i][valid_indices]
-        
             sorted_scores, sorted_idx = torch.sort(valid_scores, descending=True)
             k = min(top_k, len(sorted_idx))
             top_indices = valid_indices[sorted_idx[:k]].tolist()
         else:
             top_indices = []
-        
+
         hard_negatives_indices.append(top_indices)
-    
+
     return hard_negatives_indices
 
 
-def get_data_from_json(data_path: str) -> tuple:
+def get_data_from_json(data_path: str):
     queries = []
     contexts = []
     queries_emb = []
     contexts_emb = []
-    
+
     with open(data_path, "r", encoding="utf-8") as f:
         for line in tqdm(f, desc="Чтение файла"):
             sample = json.loads(line)
             queries.append(sample["query"])
             contexts.append(sample["context"])
-            queries_emb.append(sample["query_emb"][0])
-            contexts_emb.append(sample["context_emb"][0])
-    
-    queries_emb = torch.tensor(queries_emb)
-    contexts_emb = torch.tensor(contexts_emb)
-    
+            queries_emb.append(sample["query_emb"])
+            contexts_emb.append(sample["context_emb"])
+
+    queries_emb = torch.tensor(queries_emb, dtype=torch.float32)
+    contexts_emb = torch.tensor(contexts_emb, dtype=torch.float32)
+
     return queries, contexts, queries_emb, contexts_emb
 
 
-def start_mining(data_path: str, output_file: str, margin: float = 0.95, top_k: int = 5, batch_size: int = None):
+def start_mining(data_path, output_file, margin=0.95, top_k=5, batch_size=None):
     queries, contexts, queries_emb, contexts_emb = get_data_from_json(data_path)
-    
-    device = "cuda" if  torch.cuda.is_available() else "cpu"
-    
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
     queries_emb = queries_emb.to(device)
     contexts_emb = contexts_emb.to(device)
-    
-    if batch_size is None:
-        hard_negatives_indices = hard_negative_mining_batch(queries_emb, contexts_emb, margin, top_k)
-    else:
-        hard_negatives_indices = []
-        num_batches = (len(queries) + batch_size - 1) // batch_size
-        
-        for i in tqdm(range(num_batches)):
-            start_idx = i * batch_size
-            end_idx = min((i + 1) * batch_size, len(queries))
+
+    N = len(queries)
+
+    with torch.no_grad():
+        if batch_size is None:
+            pos_idx = torch.arange(N, device=device)
+            hard_negatives_indices = hard_negative_mining_batch(queries_emb, contexts_emb, pos_idx, margin, top_k)
+        else:
+            hard_negatives_indices: list[list[int]] = []
+            num_batches = (N + batch_size - 1) // batch_size
+
+            for b in tqdm(range(num_batches), desc="Майнинг батчей"):
+                start_idx = b * batch_size
+                end_idx = min((b + 1) * batch_size, N)
+
+                batch_queries = queries_emb[start_idx:end_idx]  
             
-            batch_hn = hard_negative_mining_batch(queries_emb[start_idx:end_idx], contexts_emb, margin, top_k)
-            hard_negatives_indices.extend(batch_hn)
-    
+                batch_pos_idx = torch.arange(start_idx, end_idx, device=device)
+
+                batch_hn = hard_negative_mining_batch(batch_queries, contexts_emb, batch_pos_idx, margin, top_k)
+                hard_negatives_indices.extend(batch_hn)
+
+    kept = 0
+    skipped = 0
+
     with open(output_file, "w", encoding="utf-8") as f:
-        for idx in tqdm(range(len(queries))):
+        for idx in tqdm(range(N), desc="Запись результата"):
             hn_indices = hard_negatives_indices[idx]
+
+            if len(hn_indices) < top_k:
+                skipped += 1
+                continue
+
             hn_docs = [contexts[i] for i in hn_indices]
-            
+
             result = {
                 "index": idx,
                 "query": queries[idx],
                 "positive": contexts[idx],
-                "hard_negatives": hn_docs
+                "hard_negatives": hn_docs,
             }
-            
+
             f.write(json.dumps(result, ensure_ascii=False) + "\n")
-    
+            kept += 1
+
+    print(f"Всего примеров: {N}")
+    print(f"Сохранено примеров: {kept}")
+    print(f"Пропущено (меньше {top_k} негативов): {skipped}")
     print(f"Результаты сохранены в {output_file}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -102,9 +126,9 @@ if __name__ == "__main__":
     parser.add_argument("--margin", type=float, default=0.95)
     parser.add_argument("--top_k", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=None)
-    
+
     args = parser.parse_args()
-    
+
     start_mining(
         args.data_path,
         args.output_file,
