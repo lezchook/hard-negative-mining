@@ -85,6 +85,9 @@ class LitContrastiveModel(LightningModule):
         self.epochs = epochs
         self.train_len = train_len
 
+        self.test_query_embs = []
+        self.test_passage_embs = []
+
     def forward(self, x):
         query = self.tokenizer(x["question"], return_tensors="pt", truncation=True, padding=True).to(self.device)
         passage = self.tokenizer(x["context"], return_tensors="pt", truncation=True, padding=True).to(self.device)
@@ -168,32 +171,46 @@ class LitContrastiveModel(LightningModule):
         if val_loss is not None:
             print(f"Validation NDCG@2: {val_loss:.4f}")
 
+    def on_test_start(self) -> None:
+        self.test_query_embs = []
+        self.test_passage_embs = []
+
     def test_step(self, x, batch_idx):
         query = self.tokenizer(x["question"], return_tensors="pt", truncation=True, padding=True).to(self.device)
         passage = self.tokenizer(x["context"], return_tensors="pt", truncation=True, padding=True).to(self.device)
         query_output = self.model(**query)
         passage_output = self.model(**passage)
+
         query_emb = pool(query_output.last_hidden_state, query["attention_mask"], pooling_method="mean")
-        passage_emb = pool(passage_output.last_hidden_state, passage["attention_mask"],pooling_method="mean")
-        
-        scores = torch.zeros(len(query_emb), len(passage_emb))
-        for i in range(len(query_emb)):
-            scores[i] = F.cosine_similarity(query_emb[i].unsqueeze(0), passage_emb)
+        passage_emb = pool(passage_output.last_hidden_state,passage["attention_mask"], pooling_method="mean")
 
-        ndcg_scores = []
-        for i in range(len(x["question"])):
-            labels = torch.zeros(len(x["context"]))
-            labels[i] = 1
-            ndcg_scores.append(get_ndcg(scores[i], labels, k=2))
-        
-        ndcg_scores = np.array(ndcg_scores)
-        ndcg_scores = torch.tensor(ndcg_scores, device=self.device)
+        self.test_query_embs.append(query_emb.detach().cpu())
+        self.test_passage_embs.append(passage_emb.detach().cpu())
 
-        self.log("test_ndcg@2", ndcg_scores.mean(), batch_size=len(x["question"]), on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        return None
 
-        return ndcg_scores.mean()
-    
     def on_test_epoch_end(self):
-        test_ndcg = self.trainer.callback_metrics.get("test_ndcg@2")
-        if test_ndcg is not None:
-            print(f"Test NDCG@2: {test_ndcg:.4f}")
+        all_query_embs = torch.cat(self.test_query_embs, dim=0).to(self.device)
+        all_passage_embs = torch.cat(self.test_passage_embs, dim=0).to(self.device)
+
+        N = all_query_embs.size(0)
+        k = 2
+        ndcg_scores = []
+
+        chunk_size = 16
+
+        for start in range(0, N, chunk_size):
+            end = min(start + chunk_size, N)
+            q_chunk = all_query_embs[start:end]
+
+            sim_chunk = F.cosine_similarity(q_chunk.unsqueeze(1), all_passage_embs.unsqueeze(0), dim=-1)
+
+            for local_i in range(sim_chunk.size(0)):
+                global_i = start + local_i
+                labels = torch.zeros(N, device=self.device)
+                labels[global_i] = 1
+                ndcg = get_ndcg(sim_chunk[local_i], labels, k=k)
+                ndcg_scores.append(torch.tensor(ndcg, device=self.device, dtype=torch.float32))
+
+        ndcg_scores = torch.stack(ndcg_scores)
+        self.log("test_ndcg@2_full", ndcg_scores.mean(), prog_bar=True, on_epoch=True)

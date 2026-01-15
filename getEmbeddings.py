@@ -46,10 +46,11 @@ def start_inference(data_path: str, output_file: str, batch_size: int):
     train_data = dataset["train"]
 
     all_queries = [get_detailed_instruct(task, sample["input"]) for sample in train_data]
+    all_queries_raw = [sample["input"] for sample in train_data]
     all_contexts = [sample["output"] for sample in train_data]
 
     tokenizer = AutoTokenizer.from_pretrained("intfloat/multilingual-e5-large-instruct")
-    model = AutoModel.from_pretrained("intfloat/multilingual-e5-large-instruct").to(device)
+    model = AutoModel.from_pretrained("intfloat/multilingual-e5-large-instruct", torch_dtype=torch.bfloat16).to(device)
     model.eval()
 
     with open(output_file, "w", encoding="utf-8") as f:
@@ -58,6 +59,7 @@ def start_inference(data_path: str, output_file: str, batch_size: int):
         for start_idx in range(0, len(train_data), batch_size):
             end_idx = min(start_idx + batch_size, len(train_data))
             batch_queries = all_queries[start_idx:end_idx]
+            batch_queries_raw = all_queries_raw[start_idx:end_idx]
             batch_contexts = all_contexts[start_idx:end_idx]
 
             batch_texts = batch_queries + batch_contexts
@@ -67,7 +69,7 @@ def start_inference(data_path: str, output_file: str, batch_size: int):
             query_embs = embeddings[:num_queries]
             context_embs = embeddings[num_queries:]
 
-            for i, (q, c, q_emb, c_emb) in enumerate(zip(batch_queries, batch_contexts, query_embs, context_embs)):
+            for i, (q, c, q_emb, c_emb) in enumerate(zip(batch_queries_raw, batch_contexts, query_embs, context_embs)):
                 idx = start_idx + i
                 result = {
                     "index": idx,

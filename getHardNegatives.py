@@ -5,7 +5,7 @@ import argparse
 from tqdm.auto import tqdm
 
 
-def hard_negative_mining_batch(queries_emb: Tensor, contexts_emb: Tensor, pos_idx: Tensor, margin: float = 0.95, top_k: int = 5) -> list[list[int]]:
+def hard_negative_mining_batch(queries_emb: Tensor, contexts_emb: Tensor, pos_idx: Tensor, contexts: list[str], margin: float = 0.95, top_k: int = 5) -> list[list[int]]:
     all_scores = queries_emb @ contexts_emb.T
 
     device = queries_emb.device
@@ -28,15 +28,33 @@ def hard_negative_mining_batch(queries_emb: Tensor, contexts_emb: Tensor, pos_id
     for i in range(B):
         valid_indices = torch.where(final_mask[i])[0]
 
-        if len(valid_indices) > 0:
-            valid_scores = all_scores[i][valid_indices]
-            sorted_scores, sorted_idx = torch.sort(valid_scores, descending=True)
-            k = min(top_k, len(sorted_idx))
-            top_indices = valid_indices[sorted_idx[:k]].tolist()
-        else:
-            top_indices = []
+        if len(valid_indices) == 0:
+            hard_negatives_indices.append([])
+            continue
 
-        hard_negatives_indices.append(top_indices)
+        valid_scores = all_scores[i][valid_indices]
+        sorted_scores, sorted_idx = torch.sort(valid_scores, descending=True)
+        sorted_candidate_indices = valid_indices[sorted_idx]
+
+        pos_global_idx = pos_idx[i].item()
+        positive_text = contexts[pos_global_idx]
+
+        seen_texts = {positive_text}
+        selected_indices: list[int] = []
+
+        for ctx_idx in sorted_candidate_indices.tolist():
+            ctx_text = contexts[ctx_idx]
+
+            if ctx_text in seen_texts:
+                continue
+
+            seen_texts.add(ctx_text)
+            selected_indices.append(ctx_idx)
+
+            if len(selected_indices) == top_k:
+                break
+
+        hard_negatives_indices.append(selected_indices)
 
     return hard_negatives_indices
 
@@ -74,7 +92,7 @@ def start_mining(data_path, output_file, margin=0.95, top_k=5, batch_size=None):
     with torch.no_grad():
         if batch_size is None:
             pos_idx = torch.arange(N, device=device)
-            hard_negatives_indices = hard_negative_mining_batch(queries_emb, contexts_emb, pos_idx, margin, top_k)
+            hard_negatives_indices = hard_negative_mining_batch(queries_emb, contexts_emb, pos_idx, contexts, margin, top_k)
         else:
             hard_negatives_indices: list[list[int]] = []
             num_batches = (N + batch_size - 1) // batch_size
@@ -86,8 +104,7 @@ def start_mining(data_path, output_file, margin=0.95, top_k=5, batch_size=None):
                 batch_queries = queries_emb[start_idx:end_idx]  
             
                 batch_pos_idx = torch.arange(start_idx, end_idx, device=device)
-
-                batch_hn = hard_negative_mining_batch(batch_queries, contexts_emb, batch_pos_idx, margin, top_k)
+                batch_hn = hard_negative_mining_batch(batch_queries, contexts_emb, batch_pos_idx, contexts, margin, top_k)
                 hard_negatives_indices.extend(batch_hn)
 
     kept = 0
@@ -115,7 +132,7 @@ def start_mining(data_path, output_file, margin=0.95, top_k=5, batch_size=None):
 
     print(f"Всего примеров: {N}")
     print(f"Сохранено примеров: {kept}")
-    print(f"Пропущено (меньше {top_k} негативов): {skipped}")
+    print(f"Пропущено (меньше {top_k} уникальных негативов): {skipped}")
     print(f"Результаты сохранены в {output_file}")
 
 
