@@ -14,6 +14,9 @@ def hard_negative_mining_batch(queries_emb: Tensor, contexts_emb: Tensor, pos_id
     row_idx = torch.arange(B, device=device)
 
     pos_scores = all_scores[row_idx, pos_idx]
+    for score in pos_scores:
+        if score.item() < 0:
+            print("WARNING NEGATIVE SCORE")
 
     thresholds = pos_scores * margin
 
