@@ -97,7 +97,7 @@ def load_train_data_filtered(train_data_path, test_global_indices):
     return train_data
 
 
-def start(train_data_path, val_data_path, batch_size):
+def start(train_data_path, val_data_path, batch_size, model_path, loss_type, train_mode):
 
     seed_everything(42, workers=True)
 
@@ -134,14 +134,25 @@ def start(train_data_path, val_data_path, batch_size):
     trainloader = DataLoader(train_dataset, batch_size=None, collate_fn=lambda x: x, shuffle=True)
     valloader = DataLoader(val_dataset, batch_size=None, collate_fn=lambda x: x, shuffle=False)
 
+    if loss_type == "HardNegative":
+        loss_fn = HardNegativeInfoNCELoss()
+        print("FUNCTION LOSS: HardNegative")
+    elif loss_type == "Contrastive":
+        loss_fn = ContrastiveLoss()
+        print("FUNCTION LOSS: ContrastiveLoss")
+
     model = LitContrastiveModel(
-        model_path="cointegrated/rubert-tiny2",
-        loss_fn=HardNegativeInfoNCELoss(),
+        model_path=model_path,
+        loss_fn=loss_fn,
         lr=9e-5,
         weight_decay=0.01,
         warmup_ratio=0.1,
         epochs=2,
         train_len=len(trainloader),
+        max_length=512,
+        query_prefix = "search_query: ",
+        doc_prefix = "search_document: ",
+        pooling_method = "mean"
     )
 
     trainer = Trainer(
@@ -151,7 +162,9 @@ def start(train_data_path, val_data_path, batch_size):
         deterministic=True,
     )
 
-    trainer.fit(model, train_dataloaders=trainloader, val_dataloaders=valloader)
+    if train_mode == "True":
+        trainer.fit(model, train_dataloaders=trainloader, val_dataloaders=valloader)
+    
     trainer.test(model, dataloaders=testloader)
 
 
@@ -160,6 +173,9 @@ if __name__ == "__main__":
     parser.add_argument("--train_data_path", type=str, required=True)
     parser.add_argument("--val_data_path", type=str, required=True)
     parser.add_argument("--batch_size", type=int, required=True)
+    parser.add_argument("--model_path", type=str, required=True)
+    parser.add_argument("--loss_type", type=str, default="HardNegative")
+    parser.add_argument("--train_mode", type=str, default="True")
     args = parser.parse_args()
 
-    start(args.train_data_path, args.val_data_path, args.batch_size)
+    start(args.train_data_path, args.val_data_path, args.batch_size, args.model_path, args.loss_type, args.train_mode)
