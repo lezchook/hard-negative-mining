@@ -13,6 +13,8 @@ def pool(hidden_state, mask, pooling_method="cls"):
         return s / d
     elif pooling_method == "cls":
         return hidden_state[:, 0]
+    else:
+        raise ValueError(f"Unknown pooling_method={pooling_method}")
 
 class ContrastiveLoss(nn.Module):
     def __init__(self):
@@ -73,9 +75,13 @@ class HardNegativeInfoNCELoss(nn.Module):
         return loss.mean()
 
 class LitContrastiveModel(LightningModule):
-    def __init__(self, model_path, loss_fn, lr, weight_decay, warmup_ratio, epochs, train_len):
+    def __init__(self, model_path, loss_fn, lr, weight_decay, warmup_ratio, epochs, train_len,
+                 max_length: int = 512,
+                 query_prefix: str = "search_query: ",
+                 doc_prefix: str = "search_document: ",
+                 pooling_method: str = "mean"):
         super().__init__()
-        
+
         self.model = AutoModel.from_pretrained(model_path)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.loss_fn = loss_fn
@@ -84,24 +90,33 @@ class LitContrastiveModel(LightningModule):
         self.warmup_ratio = warmup_ratio
         self.epochs = epochs
         self.train_len = train_len
+        self.max_length = max_length
+        self.query_prefix = query_prefix
+        self.doc_prefix = doc_prefix
+        self.pooling_method = pooling_method
 
         self.test_query_embs = []
         self.test_passage_embs = []
 
     def forward(self, x):
-        query = self.tokenizer(x["question"], return_tensors="pt", truncation=True, padding=True).to(self.device)
-        passage = self.tokenizer(x["context"], return_tensors="pt", truncation=True, padding=True).to(self.device)
+        q_texts = [self.query_prefix + t for t in x["question"]]
+        d_texts = [self.doc_prefix + t for t in x["context"]]
+
+        query = self.tokenizer(q_texts, return_tensors="pt", truncation=True, padding=True, max_length=self.max_length).to(self.device)
+        passage = self.tokenizer(d_texts, return_tensors="pt", truncation=True, padding=True, max_length=self.max_length).to(self.device)
+
         query_output = self.model(**query)
         passage_output = self.model(**passage)
-        query_emb = pool(query_output.last_hidden_state, query["attention_mask"], pooling_method="mean")
-        passage_emb = pool(passage_output.last_hidden_state, passage["attention_mask"],pooling_method="mean")
-        
+        query_emb = pool(query_output.last_hidden_state, query["attention_mask"], pooling_method=self.pooling_method)
+        passage_emb = pool(passage_output.last_hidden_state, passage["attention_mask"], pooling_method=self.pooling_method)
+
         if isinstance(self.loss_fn, HardNegativeInfoNCELoss):
             hard_negatives = []
             for i in range(len(x["hard_negatives"])):
-                tokens = self.tokenizer(x["hard_negatives"][i], return_tensors="pt", truncation=True, padding=True).to(self.device)
+                hn_texts = [self.doc_prefix + t for t in x["hard_negatives"][i]]
+                tokens = self.tokenizer(hn_texts, return_tensors="pt", truncation=True, padding=True, max_length=self.max_length).to(self.device)
                 output = self.model(**tokens)
-                output_emb = pool(output.last_hidden_state, tokens["attention_mask"], pooling_method="mean")
+                output_emb = pool(output.last_hidden_state, tokens["attention_mask"], pooling_method=self.pooling_method)
                 hard_negatives.append(output_emb)
 
             hard_negatives_emb = torch.stack(hard_negatives)
@@ -148,25 +163,27 @@ class LitContrastiveModel(LightningModule):
             print(f"Training Loss: {train_loss:.4f}")
 
     def validation_step(self, x, batch_idx):
-        query = self.tokenizer(x["question"], return_tensors="pt", truncation=True, padding=True).to(self.device)
-        passage = self.tokenizer(x["context"], return_tensors="pt", truncation=True, padding=True).to(self.device)
+        q_texts = [self.query_prefix + t for t in x["question"]]
+        d_texts = [self.doc_prefix + t for t in x["context"]]
+        query = self.tokenizer(q_texts, return_tensors="pt", truncation=True, padding=True, max_length=self.max_length).to(self.device)
+        passage = self.tokenizer(d_texts, return_tensors="pt", truncation=True, padding=True, max_length=self.max_length).to(self.device)
+        
         query_output = self.model(**query)
         passage_output = self.model(**passage)
-        query_emb = pool(query_output.last_hidden_state, query["attention_mask"], pooling_method="mean")
-        passage_emb = pool(passage_output.last_hidden_state, passage["attention_mask"],pooling_method="mean")
+        query_emb = pool(query_output.last_hidden_state, query["attention_mask"], pooling_method=self.pooling_method)
+        passage_emb = pool(passage_output.last_hidden_state, passage["attention_mask"], pooling_method=self.pooling_method)
         
-        scores = torch.zeros(len(query_emb), len(passage_emb))
+        scores = torch.zeros(len(query_emb), len(passage_emb), device=self.device)
         for i in range(len(query_emb)):
             scores[i] = F.cosine_similarity(query_emb[i].unsqueeze(0), passage_emb)
 
         ndcg_scores = []
         for i in range(len(x["question"])):
-            labels = torch.zeros(len(x["context"]))
+            labels = torch.zeros(len(x["context"]), device=self.device)
             labels[i] = 1
             ndcg_scores.append(get_ndcg(scores[i], labels, k=2))
         
-        ndcg_scores = np.array(ndcg_scores)
-        ndcg_scores = torch.tensor(ndcg_scores, device=self.device)
+        ndcg_scores = torch.tensor(np.array(ndcg_scores), device=self.device)
 
         self.log("val_ndcg@2", ndcg_scores.mean(), batch_size=len(x["question"]), on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
@@ -182,18 +199,19 @@ class LitContrastiveModel(LightningModule):
         self.test_passage_embs = []
 
     def test_step(self, x, batch_idx):
-        query = self.tokenizer(x["question"], return_tensors="pt", truncation=True, padding=True).to(self.device)
-        passage = self.tokenizer(x["context"], return_tensors="pt", truncation=True, padding=True).to(self.device)
+        q_texts = [self.query_prefix + t for t in x["question"]]
+        d_texts = [self.doc_prefix + t for t in x["context"]]
+        query = self.tokenizer(q_texts, return_tensors="pt", truncation=True, padding=True, max_length=self.max_length).to(self.device)
+        passage = self.tokenizer(d_texts, return_tensors="pt", truncation=True, padding=True, max_length=self.max_length).to(self.device)
+
         query_output = self.model(**query)
         passage_output = self.model(**passage)
 
-        query_emb = pool(query_output.last_hidden_state, query["attention_mask"], pooling_method="mean")
-        passage_emb = pool(passage_output.last_hidden_state,passage["attention_mask"], pooling_method="mean")
+        query_emb = pool(query_output.last_hidden_state, query["attention_mask"], pooling_method=self.pooling_method)
+        passage_emb = pool(passage_output.last_hidden_state, passage["attention_mask"], pooling_method=self.pooling_method)
 
         self.test_query_embs.append(query_emb.detach().cpu())
         self.test_passage_embs.append(passage_emb.detach().cpu())
-
-        return None
 
     def on_test_epoch_end(self):
         all_query_embs = torch.cat(self.test_query_embs, dim=0).to(self.device)
