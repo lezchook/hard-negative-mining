@@ -95,17 +95,21 @@ class LitContrastiveModel(LightningModule):
         passage_output = self.model(**passage)
         query_emb = pool(query_output.last_hidden_state, query["attention_mask"], pooling_method="mean")
         passage_emb = pool(passage_output.last_hidden_state, passage["attention_mask"],pooling_method="mean")
+        
+        if isinstance(self.loss_fn, HardNegativeInfoNCELoss):
+            hard_negatives = []
+            for i in range(len(x["hard_negatives"])):
+                tokens = self.tokenizer(x["hard_negatives"][i], return_tensors="pt", truncation=True, padding=True).to(self.device)
+                output = self.model(**tokens)
+                output_emb = pool(output.last_hidden_state, tokens["attention_mask"], pooling_method="mean")
+                hard_negatives.append(output_emb)
 
-        hard_negatives = []
-        for i in range(len(x["hard_negatives"])):
-            tokens = self.tokenizer(x["hard_negatives"][i], return_tensors="pt", truncation=True, padding=True).to(self.device)
-            output = self.model(**tokens)
-            output_emb = pool(output.last_hidden_state, tokens["attention_mask"], pooling_method="mean")
-            hard_negatives.append(output_emb)
+            hard_negatives_emb = torch.stack(hard_negatives)
 
-        hard_negatives_emb = torch.stack(hard_negatives)
+            return query_emb, passage_emb, hard_negatives_emb
 
-        return query_emb, passage_emb, hard_negatives_emb
+        elif isinstance(self.loss_fn, ContrastiveLoss):
+            return query_emb, passage_emb
     
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
@@ -120,21 +124,23 @@ class LitContrastiveModel(LightningModule):
         return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
     
     def training_step(self, batch, batch_idx):
-        query_emb, passage_emb, hard_negatives_emb = self(batch)
-        loss = self.loss_fn(query_emb, passage_emb, hard_negatives_emb)
-        self.log("train_loss", loss, batch_size=query_emb.shape[0], on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
-        return loss
+        if isinstance(self.loss_fn, HardNegativeInfoNCELoss):
+            query_emb, passage_emb, hard_negatives_emb = self(batch)
+            loss = self.loss_fn(query_emb, passage_emb, hard_negatives_emb)
+            self.log("train_loss", loss, batch_size=query_emb.shape[0], on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+            return loss
 
-        #query_emb, passage_emb = self(batch)
-        #negative_passages = []
-        #for i in range(len(passage_emb)):
-        #    negatives = torch.cat([passage_emb[:i], passage_emb[i + 1:]])
-        #    negative_passages.append(negatives)
-        #negative_passages = torch.stack(negative_passages)
+        elif isinstance(self.loss_fn, ContrastiveLoss):
+            query_emb, passage_emb = self(batch)
+            negative_passages = []
+            for i in range(len(passage_emb)):
+                negatives = torch.cat([passage_emb[:i], passage_emb[i + 1:]])
+                negative_passages.append(negatives)
+            negative_passages = torch.stack(negative_passages)
 
-        #loss = self.loss_fn(query_emb, passage_emb, negative_passages, 0.01)
-        #self.log("train_loss", loss, batch_size=query_emb.shape[0], on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
-        #return loss
+            loss = self.loss_fn(query_emb, passage_emb, negative_passages, 0.01)
+            self.log("train_loss", loss, batch_size=query_emb.shape[0], on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+            return loss
     
     def on_train_epoch_end(self):
         train_loss = self.trainer.callback_metrics.get("train_loss")
