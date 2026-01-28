@@ -1,11 +1,15 @@
 import json
 import torch
 from torch import Tensor
+import torch.nn.functional as F
 import argparse
 from tqdm.auto import tqdm
 
 
 def hard_negative_mining_batch(queries_emb: Tensor, contexts_emb: Tensor, pos_idx: Tensor, contexts: list[str], margin: float = 0.95, top_k: int = 5) -> list[list[int]]:
+    queries_emb = F.normalize(queries_emb, p=2, dim=1)
+    contexts_emb = F.normalize(contexts_emb, p=2, dim=1)
+
     all_scores = queries_emb @ contexts_emb.T
 
     device = queries_emb.device
@@ -14,9 +18,6 @@ def hard_negative_mining_batch(queries_emb: Tensor, contexts_emb: Tensor, pos_id
     row_idx = torch.arange(B, device=device)
 
     pos_scores = all_scores[row_idx, pos_idx]
-    for score in pos_scores:
-        if score.item() < 0:
-            print("WARNING NEGATIVE SCORE")
 
     thresholds = pos_scores * margin
 
@@ -29,6 +30,10 @@ def hard_negative_mining_batch(queries_emb: Tensor, contexts_emb: Tensor, pos_id
     hard_negatives_indices: list[list[int]] = []
 
     for i in range(B):
+        if pos_scores[i].item() < 0:
+            hard_negatives_indices.append([])
+            continue
+
         valid_indices = torch.where(final_mask[i])[0]
 
         if len(valid_indices) == 0:
@@ -112,9 +117,18 @@ def start_mining(data_path, output_file, margin=0.95, top_k=5, batch_size=None):
 
     kept = 0
     skipped = 0
+    skipped_neg_pos = 0
 
     with open(output_file, "w", encoding="utf-8") as f:
         for idx in tqdm(range(N), desc="Запись результата"):
+            q = F.normalize(queries_emb[idx:idx+1], p=2, dim=1)
+            p = F.normalize(contexts_emb[idx:idx+1], p=2, dim=1)
+            pos_score = (q @ p.T).item()
+
+            if pos_score < 0:
+                skipped_neg_pos += 1
+                continue
+
             hn_indices = hard_negatives_indices[idx]
 
             if len(hn_indices) < top_k:
@@ -133,8 +147,10 @@ def start_mining(data_path, output_file, margin=0.95, top_k=5, batch_size=None):
             f.write(json.dumps(result, ensure_ascii=False) + "\n")
             kept += 1
 
+
     print(f"Всего примеров: {N}")
     print(f"Сохранено примеров: {kept}")
+    print(f"Пропущено (pos cosine < 0): {skipped_neg_pos}")
     print(f"Пропущено (меньше {top_k} уникальных негативов): {skipped}")
     print(f"Результаты сохранены в {output_file}")
 
