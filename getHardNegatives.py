@@ -6,11 +6,12 @@ import argparse
 from tqdm.auto import tqdm
 
 
-def hard_negative_mining_batch(queries_emb: Tensor, contexts_emb: Tensor, pos_idx: Tensor, contexts: list[str], margin: float = 0.95, top_k: int = 5) -> list[list[int]]:
+def hard_negative_mining_batch(queries_emb: Tensor, contexts_emb: Tensor, pos_idx: Tensor, contexts: list[str], margin: float = 0.97, top_k: int = 5) -> list[list[int]]:
     queries_emb = F.normalize(queries_emb, p=2, dim=1)
     contexts_emb = F.normalize(contexts_emb, p=2, dim=1)
 
     all_scores = queries_emb @ contexts_emb.T
+    all_scores = (all_scores + 1.0) / 2.0
 
     device = queries_emb.device
     B = queries_emb.size(0)
@@ -30,10 +31,6 @@ def hard_negative_mining_batch(queries_emb: Tensor, contexts_emb: Tensor, pos_id
     hard_negatives_indices: list[list[int]] = []
 
     for i in range(B):
-        if pos_scores[i].item() < 0:
-            hard_negatives_indices.append([])
-            continue
-
         valid_indices = torch.where(final_mask[i])[0]
 
         if len(valid_indices) == 0:
@@ -87,7 +84,7 @@ def get_data_from_json(data_path: str):
     return queries, contexts, queries_emb, contexts_emb
 
 
-def start_mining(data_path, output_file, margin=0.95, top_k=5, batch_size=None):
+def start_mining(data_path, output_file, margin=0.97, top_k=5, batch_size=None):
     queries, contexts, queries_emb, contexts_emb = get_data_from_json(data_path)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -117,18 +114,9 @@ def start_mining(data_path, output_file, margin=0.95, top_k=5, batch_size=None):
 
     kept = 0
     skipped = 0
-    skipped_neg_pos = 0
 
     with open(output_file, "w", encoding="utf-8") as f:
         for idx in tqdm(range(N), desc="Запись результата"):
-            q = F.normalize(queries_emb[idx:idx+1], p=2, dim=1)
-            p = F.normalize(contexts_emb[idx:idx+1], p=2, dim=1)
-            pos_score = (q @ p.T).item()
-
-            if pos_score < 0:
-                skipped_neg_pos += 1
-                continue
-
             hn_indices = hard_negatives_indices[idx]
 
             if len(hn_indices) < top_k:
@@ -150,7 +138,6 @@ def start_mining(data_path, output_file, margin=0.95, top_k=5, batch_size=None):
 
     print(f"Всего примеров: {N}")
     print(f"Сохранено примеров: {kept}")
-    print(f"Пропущено (pos cosine < 0): {skipped_neg_pos}")
     print(f"Пропущено (меньше {top_k} уникальных негативов): {skipped}")
     print(f"Результаты сохранены в {output_file}")
 
@@ -159,7 +146,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, required=True)
     parser.add_argument("--output_file", type=str, required=True)
-    parser.add_argument("--margin", type=float, default=0.95)
+    parser.add_argument("--margin", type=float, default=0.97)
     parser.add_argument("--top_k", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=None)
 
